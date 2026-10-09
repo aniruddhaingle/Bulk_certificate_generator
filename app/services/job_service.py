@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -9,6 +10,9 @@ from app.repositories.certificate_repository import CertificateRepository
 from app.repositories.job_repository import JobRepository
 from app.schemas.certificate_job import CertificateJobCreate
 from app.utils.ids import generate_certificate_number
+from app.workers.tasks import process_certificate_job
+
+logger = logging.getLogger(__name__)
 
 
 class JobService:
@@ -39,6 +43,18 @@ class JobService:
 
         self.db.commit()
         self.db.refresh(job)
+
+        try:
+            process_certificate_job.delay(str(job.id))
+        except Exception as exc:
+            # The job and its certificates are already committed — that part
+            # of the contract held. If the broker itself is unreachable, the
+            # job genuinely cannot be processed, which is exactly what
+            # JobStatus.FAILED means; it is not a 500 on this request.
+            logger.error("failed to schedule processing for job %s: %s", job.id, exc)
+            self.job_repo.mark_scheduling_failed(job.id, str(exc)[:500])
+            self.db.commit()
+            self.db.refresh(job)
 
         return job
 
